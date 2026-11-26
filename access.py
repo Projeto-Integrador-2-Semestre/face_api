@@ -70,9 +70,9 @@ def decidir(cpf: str) -> dict:
     return {"registrado": True, "tipo": tipo, "data_hora": agora}
 
 
-def persistir(cpf: str, tipo: str, data_hora: datetime) -> None:
-    """Grava o log no D1. Roda em segundo plano, depois da resposta."""
+def persistir(cpf: str, tipo: str, data_hora: datetime, catraca_id: Optional[int] = None) -> None:
+    """Grava o log no D1 (com a catraca do totem, se informada). Roda em segundo plano, depois da resposta."""
     try:
-        db.add_log(cpf=cpf, tipo=tipo, data_hora=data_hora)
+        db.add_log(cpf=cpf, tipo=tipo, data_hora=data_hora, catraca_id=catraca_id)
     except Exception as exc:
         logger.error("Falha ao gravar log (%s, %s, %s): %s", cpf, tipo, data_hora.isoformat(), exc)

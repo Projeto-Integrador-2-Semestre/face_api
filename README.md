@@ -47,11 +47,13 @@ Documentação interativa em `http://localhost:8000/docs` (a rota `/` redirecion
 | GET | `/access/logs` | lista os logs (filtros: `cpf`, `tipo`, `date_from`, `date_to`, `limit`) |
 | GET | `/health` | healthcheck (quantos rostos estão em memória e se o anti-spoofing está ligado) |
 | GET | `/faces/cache` | status do cache de embeddings e quais fotos cadastradas deram problema |
-| POST | `/faces/reload` | força reler a tabela `pessoa` e recalcular todos os embeddings |
+| POST | `/faces/reload` | força reler a tabela `pessoa`; `?forcar=false` processa só fotos novas/alteradas e status |
 
 ### `POST /faces/recognize`
 
-`multipart/form-data` com o campo `file` (jpg/png/webp, até `MAX_UPLOAD_BYTES`).
+`multipart/form-data` com o campo `file` (jpg/png/webp, até `MAX_UPLOAD_BYTES`) e,
+opcionalmente, `catraca_id` (id da catraca do totem na tabela `catraca`), que é
+gravado no log para o painel mostrar em qual catraca a pessoa passou.
 
 ```js
 const form = new FormData();
@@ -82,6 +84,7 @@ Quando não é:
 { "autorizado": false, "motivo": "rosto_nao_vivo",  "similaridade": 0.0,  "live_score": 0.01, "tempo_ms": 75 }
 { "autorizado": false, "motivo": "rosto_cortado",   "similaridade": 0.0,  "live_score": null, "tempo_ms": 65 }
 { "autorizado": false, "motivo": "nenhum_rosto",    "similaridade": 0.0,  "live_score": null, "tempo_ms": 60 }
+{ "autorizado": false, "motivo": "pessoa_bloqueada", "cpf": "12345678900", "nome": "Fulano", "similaridade": 0.74, "live_score": 0.97, "tempo_ms": 240 }
 ```
 
 | `motivo` | O que aconteceu | O que o frontend pode mostrar |
@@ -90,6 +93,7 @@ Quando não é:
 | `rosto_nao_vivo` | o rosto parece ser uma foto (celular, impressão, tela): `live_score` abaixo de `LIVENESS_THRESHOLD` | "Acesso negado" |
 | `rosto_cortado` | o rosto está colado demais na borda ou ocupa a imagem inteira; o anti-spoofing precisa de margem ao redor para avaliar | "Afaste-se um pouco da câmera" |
 | `nao_reconhecido` | rosto vivo, mas não bate com ninguém cadastrado | "Acesso negado" |
+| `pessoa_bloqueada` | reconheceu, mas a pessoa está com `status = 'bloqueado'` no cadastro; nada é gravado em `logs` | "Acesso bloqueado. Procure a recepção" |
 
 - `live_score` é a probabilidade (0 a 1) de o rosto ser de uma pessoa real.
   Vem `null` com `FACE_LIVENESS=false` ou quando não deu para avaliar.
@@ -185,7 +189,20 @@ Converter base64 → embedding é caro, então os embeddings ficam em memória
 - a releitura pede ao banco só `cpf`, `nome` e uma assinatura da foto, não o base64 inteiro;
 - só baixa a foto e recalcula o embedding de quem é novo ou trocou de foto;
 - quem sai da tabela sai do cache;
-- quer efeito imediato após um cadastro? chame `POST /faces/reload`.
+- quer efeito imediato após um cadastro? chame `POST /faces/reload?forcar=false`
+  (a API Java já faz isso sozinha quando `FACE_API_URL` está configurada nela).
+
+## Bloqueio de pessoa
+
+A coluna `status` da tabela `pessoa` (`liberado`/`bloqueado`) é lida junto com
+as assinaturas das fotos a cada atualização do cache. Pessoa bloqueada continua
+sendo reconhecida (o embedding fica no cache), mas a resposta vem com
+`autorizado: false` e `motivo: "pessoa_bloqueada"`, sem registro em `logs`.
+Desbloquear não exige recalcular nada.
+
+Quem bloqueia é o painel, pela API Java (`PATCH /pessoa/{cpf}/status`), que
+cria a coluna e avisa esta API. Se a coluna ainda não existir no banco, ninguém
+é tratado como bloqueado (comportamento anterior).
 
 Fotos que não são base64 válido, ou nas quais nenhum rosto é detectado, ficam
 listadas em `GET /faces/cache` com o motivo — bom para depurar cadastro ruim.
@@ -196,22 +213,25 @@ O D1 é SQLite serverless da Cloudflare. A API fala com ele pela API REST.
 
 ```sql
 CREATE TABLE pessoa (          -- mantida pela OUTRA API (aqui é só leitura)
-    cpf  TEXT PRIMARY KEY,
-    nome TEXT NOT NULL,
-    foto TEXT                  -- imagem em base64 (aceita "data:image/jpeg;base64,...")
+    cpf    TEXT PRIMARY KEY,
+    nome   TEXT NOT NULL,
+    foto   TEXT,               -- imagem em base64 (aceita "data:image/jpeg;base64,...")
+    status TEXT NOT NULL DEFAULT 'liberado'  -- 'liberado' | 'bloqueado' (criada pela API Java)
 );
 
 CREATE TABLE logs (            -- escrita por esta API
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     pessoa_cpf TEXT NOT NULL REFERENCES pessoa(cpf) ON DELETE CASCADE,
     tipo       TEXT NOT NULL CHECK (tipo IN ('entrada','saida')),
-    data_hora  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))  -- ISO 8601 UTC
+    data_hora  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), -- ISO 8601 UTC
+    catraca_id INTEGER          -- catraca do totem (opcional, criada pela API Java)
 );
 ```
 
 Se os nomes das colunas na sua base forem outros, não precisa mexer no código:
 ajuste `PESSOA_TABLE`, `PESSOA_PK`, `PESSOA_NOME_COL`, `PESSOA_FOTO_COL`,
-`LOGS_TABLE`, `LOGS_FK_COL` e `LOGS_DATETIME_COL` no `.env`.
+`PESSOA_STATUS_COL`, `LOGS_TABLE`, `LOGS_FK_COL`, `LOGS_DATETIME_COL` e
+`LOGS_CATRACA_COL` no `.env`.
 
 ## Configurando o Cloudflare D1
 
