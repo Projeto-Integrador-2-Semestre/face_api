@@ -93,6 +93,7 @@ Quando não é:
 | `rosto_nao_vivo` | o rosto parece ser uma foto (celular, impressão, tela): `live_score` abaixo de `LIVENESS_THRESHOLD` | "Acesso negado" |
 | `rosto_cortado` | o rosto está colado demais na borda ou ocupa a imagem inteira; o anti-spoofing precisa de margem ao redor para avaliar | "Afaste-se um pouco da câmera" |
 | `nao_reconhecido` | rosto vivo, mas não bate com ninguém cadastrado | "Acesso negado" |
+| `bloqueio_geral` | bloqueio de emergência ativado no painel (tabela `configuracao`, chave `bloqueio_geral`); vale para todos os rostos, nada é gravado | "Acesso suspenso. Procure a recepção" |
 | `pessoa_bloqueada` | reconheceu, mas a pessoa está com `status = 'bloqueado'` no cadastro; nada é gravado em `logs` | "Acesso bloqueado. Procure a recepção" |
 
 - `live_score` é a probabilidade (0 a 1) de o rosto ser de uma pessoa real.
@@ -199,6 +200,11 @@ as assinaturas das fotos a cada atualização do cache. Pessoa bloqueada continu
 sendo reconhecida (o embedding fica no cache), mas a resposta vem com
 `autorizado: false` e `motivo: "pessoa_bloqueada"`, sem registro em `logs`.
 Desbloquear não exige recalcular nada.
+
+O **bloqueio geral** de emergência funciona do mesmo jeito: a API Java grava
+`bloqueio_geral = true` na tabela `configuracao` e chama o reload; enquanto
+estiver ativo, qualquer rosto detectado recebe `motivo: "bloqueio_geral"`.
+O `GET /health` informa se ele está ativo.
 
 Quem bloqueia é o painel, pela API Java (`PATCH /pessoa/{cpf}/status`), que
 cria a coluna e avisa esta API. Se a coluna ainda não existir no banco, ninguém

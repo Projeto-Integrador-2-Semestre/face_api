@@ -46,6 +46,7 @@ _refresh_lock = threading.Lock()   # só um refresh por vez
 _meta: Dict[str, dict] = {}        # cpf -> {nome, assinatura, embedding}
 _invalidas: Dict[str, str] = {}    # cpf -> motivo de não ter virado embedding
 _bloqueados: frozenset = frozenset()  # cpfs com status 'bloqueado' (trocado inteiro a cada refresh)
+_bloqueio_geral: bool = False       # bloqueio de emergência de todas as catracas (tabela configuracao)
 _last_refresh: float = 0.0
 
 # Snapshot imutável consultado pelo reconhecimento. Trocado atomicamente
@@ -64,7 +65,7 @@ def refresh(force: bool = False) -> dict:
     Sincroniza o cache com a tabela `pessoa`. Com force=True recalcula o
     embedding de todo mundo. Retorna um resumo do que aconteceu.
     """
-    global _last_refresh, _cpfs, _nomes, _matrix, _bloqueados
+    global _last_refresh, _cpfs, _nomes, _matrix, _bloqueados, _bloqueio_geral
 
     with _refresh_lock:
         inicio = time.time()
@@ -126,6 +127,7 @@ def refresh(force: bool = False) -> dict:
         _nomes = [m["nome"] for _, m in validos]
         _matrix = nova_matrix
         _bloqueados = frozenset(p["cpf"] for p in pessoas if p.get("bloqueado"))
+        _bloqueio_geral = db.get_bloqueio_geral()
         _last_refresh = time.time()
 
         resumo = {
@@ -135,6 +137,7 @@ def refresh(force: bool = False) -> dict:
             "reaproveitados": reaproveitados,
             "fotos_com_problema": len(_invalidas),
             "bloqueados": len(_bloqueados),
+            "bloqueio_geral": _bloqueio_geral,
             "duracao_segundos": round(time.time() - inicio, 3),
         }
         logger.info("Cache de rostos atualizado: %s", resumo)
@@ -159,6 +162,11 @@ def identify(embedding: np.ndarray) -> Tuple[Optional[str], Optional[str], float
     return cpfs[i], nomes[i], melhor
 
 
+def bloqueio_geral_ativo() -> bool:
+    """True se o bloqueio geral estiver ativo (vale a partir do último refresh)."""
+    return _bloqueio_geral
+
+
 def esta_bloqueado(cpf: str) -> bool:
     """True se a pessoa está bloqueada no cadastro (vale a partir do último refresh)."""
     return cpf in _bloqueados
@@ -169,6 +177,7 @@ def status() -> dict:
     return {
         "embeddings_em_cache": len(_cpfs),
         "bloqueados": len(_bloqueados),
+        "bloqueio_geral": _bloqueio_geral,
         "ultima_atualizacao": (
             time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(_last_refresh)) if _last_refresh else None
         ),
