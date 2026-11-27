@@ -130,7 +130,9 @@ class Acesso(BaseModel):
 class Reconhecimento(BaseModel):
     autorizado: bool
     motivo: Optional[
-        Literal["nenhum_rosto", "rosto_nao_vivo", "rosto_cortado", "nao_reconhecido", "pessoa_bloqueada"]
+        Literal[
+            "nenhum_rosto", "rosto_nao_vivo", "rosto_cortado", "nao_reconhecido", "pessoa_bloqueada", "bloqueio_geral"
+        ]
     ] = None
     cpf: Optional[str] = None
     nome: Optional[str] = None
@@ -165,6 +167,7 @@ def health():
         "erros_startup": _erros_startup,
         "embeddings_em_cache": store.status()["embeddings_em_cache"],
         "anti_spoofing": config.FACE_LIVENESS,
+        "bloqueio_geral": store.bloqueio_geral_ativo(),
     }
 
 
@@ -188,7 +191,8 @@ def recognize_face(
     no banco em segundo plano (a resposta não espera o D1).
 
     Pessoa reconhecida mas bloqueada no cadastro recebe
-    `autorizado: false, motivo: "pessoa_bloqueada"` e nada é gravado.
+    `autorizado: false, motivo: "pessoa_bloqueada"` e nada é gravado. Com o
+    bloqueio geral ativo, todo rosto recebe `motivo: "bloqueio_geral"`.
     """
     _startup_concluido.wait()
     inicio = time.perf_counter()
@@ -200,6 +204,11 @@ def recognize_face(
     rosto = fe.analyze_main_face(image_bytes)
     if not rosto.has_face:
         return _resposta(inicio, autorizado=False, motivo="nenhum_rosto", similaridade=0.0)
+
+    if store.bloqueio_geral_ativo():
+        # Bloqueio de emergência ativado no painel: ninguém passa. Só responde quando há um
+        # rosto na frente da câmera, para o totem não ficar exibindo a tela de bloqueio sozinho.
+        return _resposta(inicio, autorizado=False, motivo="bloqueio_geral", similaridade=0.0)
 
     if rosto.embedding is None:
         # Anti-spoofing reprovou (foto/tela/impressão) ou não conseguiu avaliar

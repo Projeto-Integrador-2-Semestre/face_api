@@ -260,6 +260,20 @@ def get_fotos(cpfs: List[str]) -> Dict[str, str]:
     return fotos
 
 
+def get_bloqueio_geral() -> bool:
+    """
+    True se o bloqueio geral de emergência estiver ativo (tabela `configuracao`,
+    chave `bloqueio_geral`, mantida pela API Java). Sem a tabela, não há bloqueio.
+    """
+    try:
+        rows = _query("SELECT valor FROM configuracao WHERE chave = ?", ["bloqueio_geral"])
+    except D1Error as exc:
+        if "no such table" in str(exc).lower():
+            return False
+        raise
+    return bool(rows) and str(rows[0].get("valor") or "").strip().lower() == "true"
+
+
 # ---------------------------------------------------------------------------
 # Logs de entrada / saída
 # ---------------------------------------------------------------------------
