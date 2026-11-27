@@ -34,10 +34,14 @@ PESSOA_TABLE = os.getenv("PESSOA_TABLE", "pessoa")
 PESSOA_PK = os.getenv("PESSOA_PK", "cpf")
 PESSOA_NOME_COL = os.getenv("PESSOA_NOME_COL", "nome")
 PESSOA_FOTO_COL = os.getenv("PESSOA_FOTO_COL", "foto")
+# 'liberado' | 'bloqueado'. Criada pela API Java; se ainda não existir, ninguém é tratado como bloqueado.
+PESSOA_STATUS_COL = os.getenv("PESSOA_STATUS_COL", "status")
 
 LOGS_TABLE = os.getenv("LOGS_TABLE", "logs")
 LOGS_FK_COL = os.getenv("LOGS_FK_COL", "pessoa_cpf")
 LOGS_DATETIME_COL = os.getenv("LOGS_DATETIME_COL", "data_hora")
+# Catraca (id da tabela `catraca`) do totem que registrou a passagem. Criada pela API Java.
+LOGS_CATRACA_COL = os.getenv("LOGS_CATRACA_COL", "catraca_id")
 
 # Se True, a API cria as tabelas caso não existam (útil em dev).
 # Em produção, deixe False: quem manda no schema é a API de cadastro.

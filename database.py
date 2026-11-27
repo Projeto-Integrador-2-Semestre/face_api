@@ -4,15 +4,20 @@ database.py
 Acesso ao Cloudflare D1 (SQLite serverless) pela API REST da Cloudflare.
 
 pessoa (mantida por OUTRA API — aqui é só leitura)
-    cpf   PK
+    cpf     PK
     nome
-    foto  TEXT -> imagem em base64 (aceita data URI "data:image/jpeg;base64,...")
+    foto    TEXT -> imagem em base64 (aceita data URI "data:image/jpeg;base64,...")
+    status  'liberado' | 'bloqueado' (pessoa bloqueada é reconhecida, mas não liberada)
 
 logs (escrita por esta API)
     id          PK
     pessoa_cpf  FK -> pessoa(cpf)
     tipo        'entrada' | 'saida'
     data_hora   TEXT em ISO 8601 UTC (ex: 2026-01-20T13:05:11.204Z)
+    catraca_id  catraca do totem que registrou (opcional)
+
+As colunas `status` e `catraca_id` são criadas pela API Java. Enquanto não
+existirem, esta API funciona como antes (ninguém bloqueado, log sem catraca).
 
 Cada chamada ao D1 custa ~200-300 ms de rede, então as consultas foram
 desenhadas para o caminho quente (reconhecer + registrar) não depender delas:
@@ -62,6 +67,13 @@ _FOTO = _ident(config.PESSOA_FOTO_COL)
 _LOGS = _ident(config.LOGS_TABLE)
 _FK = _ident(config.LOGS_FK_COL)
 _DT = _ident(config.LOGS_DATETIME_COL)
+_STATUS = _ident(config.PESSOA_STATUS_COL)
+_CATRACA = _ident(config.LOGS_CATRACA_COL)
+
+
+def _coluna_inexistente(exc: Exception) -> bool:
+    """True se o erro do D1 é de coluna que ainda não existe (banco sem a migração da API Java)."""
+    return "no such column" in str(exc).lower() or "has no column named" in str(exc).lower()
 
 
 # ---------------------------------------------------------------------------
@@ -203,24 +215,31 @@ def init_db():
 
 def list_pessoas_assinaturas() -> List[dict]:
     """
-    Lista cpf, nome e uma "assinatura" barata da foto (tamanho + início + fim
-    do base64) de todas as pessoas com foto. Serve para descobrir quem é novo
-    ou trocou de foto SEM baixar os base64 inteiros a cada atualização.
+    Lista cpf, nome, status e uma "assinatura" barata da foto (tamanho +
+    início + fim do base64) de todas as pessoas com foto. Serve para descobrir
+    quem é novo ou trocou de foto SEM baixar os base64 inteiros a cada
+    atualização. O status vem junto para o bloqueio valer no próximo ciclo.
     """
-    rows = _query(
-        f"""
-        SELECT {_CPF} AS cpf, {_NOME} AS nome,
+    sql = f"""
+        SELECT {_CPF} AS cpf, {_NOME} AS nome, {{status}} AS status,
                length({_FOTO}) AS tam,
                substr({_FOTO}, 1, 64) AS ini,
                substr({_FOTO}, -64) AS fim
         FROM {_PESSOA}
         WHERE {_FOTO} IS NOT NULL AND {_FOTO} <> ''
         """
-    )
+    try:
+        rows = _query(sql.format(status=_STATUS))
+    except D1Error as exc:
+        if not _coluna_inexistente(exc):
+            raise
+        # Banco ainda sem a coluna status: todo mundo liberado, como antes
+        rows = _query(sql.format(status="NULL"))
     return [
         {
             "cpf": str(r["cpf"]),
             "nome": r["nome"],
+            "bloqueado": str(r.get("status") or "").strip().lower() == "bloqueado",
             "assinatura": f"{r['tam']}:{r['ini']}:{r['fim']}",
         }
         for r in rows
@@ -245,8 +264,29 @@ def get_fotos(cpfs: List[str]) -> Dict[str, str]:
 # Logs de entrada / saída
 # ---------------------------------------------------------------------------
 
-def add_log(cpf: str, tipo: str, data_hora: datetime) -> dict:
-    """Insere um registro de entrada/saída (com a data/hora decidida pela API) e devolve a linha."""
+def add_log(cpf: str, tipo: str, data_hora: datetime, catraca_id: Optional[int] = None) -> dict:
+    """
+    Insere um registro de entrada/saída (com a data/hora decidida pela API) e
+    devolve a linha. `catraca_id` é a catraca do totem que enviou a foto; se a
+    coluna ainda não existir no banco, o log é gravado sem ela.
+    """
+    if catraca_id is not None:
+        try:
+            rows = _query(
+                f"""
+                INSERT INTO {_LOGS} ({_FK}, tipo, {_DT}, {_CATRACA})
+                VALUES (?, ?, ?, ?)
+                RETURNING id, {_FK} AS cpf, tipo, {_DT} AS data_hora
+                """,
+                [cpf, tipo, format_dt(data_hora), int(catraca_id)],
+            )
+            return _fix_log_row(rows[0])
+        except D1Error as exc:
+            if not _coluna_inexistente(exc):
+                raise
+            logger.warning("Coluna %s ainda não existe em %s; log gravado sem a catraca.",
+                           config.LOGS_CATRACA_COL, config.LOGS_TABLE)
+
     rows = _query(
         f"""
         INSERT INTO {_LOGS} ({_FK}, tipo, {_DT})
