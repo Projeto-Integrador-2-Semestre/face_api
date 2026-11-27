@@ -28,7 +28,7 @@ from contextlib import asynccontextmanager
 from datetime import date
 from typing import List, Literal, Optional
 
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
@@ -129,7 +129,11 @@ class Acesso(BaseModel):
 
 class Reconhecimento(BaseModel):
     autorizado: bool
-    motivo: Optional[Literal["nenhum_rosto", "rosto_nao_vivo", "rosto_cortado", "nao_reconhecido"]] = None
+    motivo: Optional[
+        Literal[
+            "nenhum_rosto", "rosto_nao_vivo", "rosto_cortado", "nao_reconhecido", "pessoa_bloqueada", "bloqueio_geral"
+        ]
+    ] = None
     cpf: Optional[str] = None
     nome: Optional[str] = None
     similaridade: float
@@ -163,6 +167,7 @@ def health():
         "erros_startup": _erros_startup,
         "embeddings_em_cache": store.status()["embeddings_em_cache"],
         "anti_spoofing": config.FACE_LIVENESS,
+        "bloqueio_geral": store.bloqueio_geral_ativo(),
     }
 
 
@@ -174,12 +179,20 @@ def root():
 # Função síncrona de propósito: o FastAPI roda em threadpool e o event loop
 # não fica bloqueado durante a inferência (que leva centenas de ms na CPU).
 @app.post("/faces/recognize", response_model=Reconhecimento)
-def recognize_face(background: BackgroundTasks, file: UploadFile = File(...)):
+def recognize_face(
+    background: BackgroundTasks,
+    file: UploadFile = File(...),
+    catraca_id: Optional[int] = Form(None, ge=1, description="ID da catraca do totem (vai para o log)"),
+):
     """
     Recebe a foto da câmera, identifica o rosto principal, confere se é um
     rosto vivo (com FACE_LIVENESS=true) e responde se o acesso está
     autorizado. Quando autorizado, decide entrada/saída na hora e grava o log
     no banco em segundo plano (a resposta não espera o D1).
+
+    Pessoa reconhecida mas bloqueada no cadastro recebe
+    `autorizado: false, motivo: "pessoa_bloqueada"` e nada é gravado. Com o
+    bloqueio geral ativo, todo rosto recebe `motivo: "bloqueio_geral"`.
     """
     _startup_concluido.wait()
     inicio = time.perf_counter()
@@ -191,6 +204,11 @@ def recognize_face(background: BackgroundTasks, file: UploadFile = File(...)):
     rosto = fe.analyze_main_face(image_bytes)
     if not rosto.has_face:
         return _resposta(inicio, autorizado=False, motivo="nenhum_rosto", similaridade=0.0)
+
+    if store.bloqueio_geral_ativo():
+        # Bloqueio de emergência ativado no painel: ninguém passa. Só responde quando há um
+        # rosto na frente da câmera, para o totem não ficar exibindo a tela de bloqueio sozinho.
+        return _resposta(inicio, autorizado=False, motivo="bloqueio_geral", similaridade=0.0)
 
     if rosto.embedding is None:
         # Anti-spoofing reprovou (foto/tela/impressão) ou não conseguiu avaliar
@@ -204,9 +222,16 @@ def recognize_face(background: BackgroundTasks, file: UploadFile = File(...)):
             inicio, autorizado=False, motivo="nao_reconhecido", similaridade=sim, live_score=rosto.live_score
         )
 
+    if store.esta_bloqueado(cpf):
+        # Reconheceu, mas o acesso foi bloqueado no painel: não libera nem registra passagem
+        return _resposta(
+            inicio, autorizado=False, motivo="pessoa_bloqueada", cpf=cpf, nome=nome,
+            similaridade=sim, live_score=rosto.live_score,
+        )
+
     decisao = access.decidir(cpf)
     if decisao["registrado"]:
-        background.add_task(access.persistir, cpf, decisao["tipo"], decisao["data_hora"])
+        background.add_task(access.persistir, cpf, decisao["tipo"], decisao["data_hora"], catraca_id)
 
     return _resposta(
         inicio,
@@ -251,12 +276,17 @@ def cache_status():
 
 
 @app.post("/faces/reload")
-def reload_faces():
+def reload_faces(
+    forcar: bool = Query(True, description="true recalcula todos os embeddings; false só os novos/alterados"),
+):
     """
-    Relê a tabela `pessoa` recalculando todos os embeddings e recarrega o
-    último registro de cada pessoa. O cache também se atualiza sozinho a cada
-    FACE_CACHE_TTL_SECONDS; use isto para efeito imediato após um cadastro.
+    Relê a tabela `pessoa` e recarrega o último registro de cada pessoa. O
+    cache também se atualiza sozinho a cada FACE_CACHE_TTL_SECONDS; use isto
+    para efeito imediato após um cadastro, edição ou bloqueio.
+
+    A API Java chama com `forcar=false` depois de cada alteração: só a foto
+    nova é processada, o que importa no plano gratuito do Render (CPU fraca).
     """
-    resumo = store.refresh(force=True)
+    resumo = store.refresh(force=forcar)
     resumo["ultimos_registros_carregados"] = access.carregar_ultimos()
     return resumo
